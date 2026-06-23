@@ -12,18 +12,36 @@ except Exception:
     OUTSCRAPER_API_KEY = os.getenv("OUTSCRAPER_API_KEY")
 cliente = ApiClient(api_key=OUTSCRAPER_API_KEY)  # Inicializar cliente Outscraper
 
+
+class OutscraperAuthError(Exception):
+    """La API de Outscraper rechazó la credencial (401) o la cuenta no tiene créditos."""
+
+
+def _es_error_auth(e):
+    msg = str(e)
+    return "401" in msg or "403" in msg or "Unauthorized" in msg
+
+
 def search_businesses(query, language="es", max_leads=20):
     # Verificar que la API Key existe
     if not OUTSCRAPER_API_KEY:
-        raise ValueError("Outscraper API Key no encontrada. Revisa el archivo .env")
+        raise ValueError("Outscraper API Key no encontrada. Revisa el archivo .env o los secrets.")
 
     # Hacer la búsqueda - limit controla cuantos resultados devuelve
-    resultados = cliente.google_maps_search(
-        query,
-        limit = max_leads,
-        language = language,
-        region = "CO"
-    )
+    try:
+        resultados = cliente.google_maps_search(
+            query,
+            limit = max_leads,
+            language = language,
+            region = "CO"
+        )
+    except Exception as e:
+        if _es_error_auth(e):
+            raise OutscraperAuthError(
+                "Outscraper rechazó la API key (401). La cuenta puede no tener créditos "
+                "disponibles o la key es inválida. Revisa tu saldo en https://app.outscraper.com/profile"
+            ) from e
+        raise
 
     # Outscraper devuelve la lista de listas
     empresas = []
@@ -38,12 +56,17 @@ def search_businesses(query, language="es", max_leads=20):
                 "Reseñas_totales": empresa.get("reviews", 0)
             })
 
-    empresas = enrich_emails(empresas) # Enriquecer con emails
+    empresas = enrich_emails(empresas) # Enriquecer con emails (no crítico)
     return empresas
+
 
 def enrich_emails(empresas):
     # Filtra solo las empresas que tienen sitio web
     con_web = [e for e in empresas if e["Sitio Web"] != "N/A"]
+
+    # Garantizar que todas tengan la columna Email aunque el enriquecimiento falle
+    for empresa in empresas:
+        empresa.setdefault("Email", "N/A")
 
     if not con_web:
         return empresas
@@ -51,8 +74,12 @@ def enrich_emails(empresas):
     # Extrae los dominios de las empresas con Web.
     dominios = [e["Sitio Web"] for e in con_web]
 
-    # Buscar emails para cada dominio
-    resultados = cliente.emails_and_contacts(dominios)
+    # Buscar emails para cada dominio. Es un paso lento y secundario:
+    # si falla (timeout, 401, etc.) devolvemos los leads igualmente.
+    try:
+        resultados = cliente.emails_and_contacts(dominios)
+    except Exception:
+        return empresas
 
     # Crear diccionario dominio -> email para búsqueda rápida.
     emails_por_dominio = {}

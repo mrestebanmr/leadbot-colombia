@@ -5,7 +5,7 @@ import pickle
 from dotenv import load_dotenv
 import plotly.express as px
 import plotly.graph_objects as go
-from src.scraper import search_businesses
+from src.scraper import search_businesses, OutscraperAuthError
 from src.cleaner import limpiar_datos
 from src.exporter import exportar_google_sheets
 from src.auth import (
@@ -176,6 +176,8 @@ if buscar and query:
                 st.info("🔍 No se encontraron empresas. Prueba con otra búsqueda.")
             else:
                 st.session_state.df = limpiar_datos(resultado)
+    except OutscraperAuthError as e:
+        st.error(f"🔑 {e}")
     except ValueError as e:
         st.error(f"⚠️ Error: {e}")
     except ConnectionError:

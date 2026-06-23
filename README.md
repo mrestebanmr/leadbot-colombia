@@ -119,6 +119,20 @@ Para la exportación a Google Sheets necesitas además las credenciales OAuth en
 
 ---
 
+## ☁️ Despliegue en Streamlit Cloud
+
+1. **Sube el repo a GitHub** (los archivos sensibles ya están en `.gitignore`).
+2. En [share.streamlit.io](https://share.streamlit.io) crea una nueva app apuntando a este repo, branch `main`, archivo `app.py`.
+3. En **Settings → Secrets**, pega el contenido de [`.streamlit/secrets.toml.example`](.streamlit/secrets.toml.example) con tus valores reales:
+   - `OUTSCRAPER_API_KEY` — **debe tener créditos disponibles** (si no, las búsquedas fallan con error 401).
+   - `GOOGLE_MAPS_API_KEY`, `GOOGLE_SHEET_ID`.
+   - Sección `[oauth_credentials]` (solo si quieres exportar a Google Sheets): `client_id`, `client_secret` y `redirect_uri`.
+4. **OAuth en producción:** en [Google Cloud Console](https://console.cloud.google.com/apis/credentials) agrega la URL pública de tu app (ej. `https://tu-app.streamlit.app`) como **URI de redireccionamiento autorizado**, y pon esa misma URL en `redirect_uri` de los secrets.
+
+> ⚠️ La exportación CSV funciona sin OAuth. Google Sheets requiere la sección `[oauth_credentials]`.
+
+---
+
 ## 👨‍💻 Autor
 
 **Esteban Muriel**
