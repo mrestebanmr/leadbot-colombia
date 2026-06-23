@@ -16,72 +16,61 @@ except Exception:
 # Cliente del SDK solo para el enriquecimiento de emails (paso secundario).
 cliente = ApiClient(api_key=OUTSCRAPER_API_KEY)
 
-# La búsqueda principal NO usa el SDK: su endpoint síncrono (/google-maps-search)
-# devuelve 504 con frecuencia y deja la app colgada. Usamos el endpoint asíncrono
-# /maps/search-v2 con polling propio, que es estable, y controlamos timeouts y
-# reintentos para que la búsqueda nunca se quede colgada indefinidamente.
+# La búsqueda usa el endpoint "tiempo real" (síncrono) de Outscraper: devuelve los
+# resultados en segundos, igual que hacía LeadBot Italia. NO usamos la cola asíncrona
+# del nivel gratuito (que puede tardar hasta 1 hora). Llamamos al endpoint directamente
+# en vez de via SDK para poder fijar un TIMEOUT (que el SDK no expone) y así garantizar
+# que la búsqueda nunca deje la app colgada, además de reintentar ante blips puntuales.
 _BASE_URL = "https://api.app.outscraper.com"
-_REINTENTOS = 8                 # reintentos ante errores transitorios
-_CODIGOS_REINTENTABLES = {401, 403, 429, 500, 502, 503, 504}
-_MAX_ESPERA_RESULTADO = 240     # segundos máximos esperando el resultado (polling)
+_SEARCH_PATH = "/google-maps-search"
+_TIMEOUT = 90                                  # segundos por petición
+_REINTENTOS = 4                                # reintentos ante errores transitorios
+_CODIGOS_REINTENTABLES = {429, 500, 502, 503, 504}
 
 
 class OutscraperAuthError(Exception):
-    """Outscraper rechazó la petición de forma persistente (key, créditos o límite temporal)."""
-
-
-def _peticion(session, url, params=None):
-    """GET con reintentos ante errores transitorios (401/5xx) y caídas de conexión."""
-    ultimo = None
-    for intento in range(_REINTENTOS):
-        try:
-            r = session.get(url, params=params, timeout=40)
-            if r.status_code < 400:
-                return r
-            ultimo = f"HTTP {r.status_code}"
-            if r.status_code not in _CODIGOS_REINTENTABLES:
-                r.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            ultimo = f"conexión ({type(e).__name__})"
-        time.sleep(min(2 * (intento + 1), 12))  # backoff progresivo
-
-    raise OutscraperAuthError(
-        f"Outscraper no respondió correctamente tras {_REINTENTOS} intentos ({ultimo}). "
-        "Puede ser un límite temporal de la cuenta, falta de créditos o una key inválida. "
-        "Revisa tu saldo en https://app.outscraper.com/profile e inténtalo de nuevo en unos minutos."
-    )
+    """Outscraper rechazó la petición (key inválida, sin créditos o límite temporal)."""
 
 
 def search_businesses(query, language="es", max_leads=20):
     if not OUTSCRAPER_API_KEY:
         raise ValueError("Outscraper API Key no encontrada. Revisa el archivo .env o los secrets.")
 
-    session = requests.Session()
-    session.headers.update({"X-API-KEY": OUTSCRAPER_API_KEY})
-
-    # 1) Enviar la tarea de búsqueda (endpoint asíncrono)
-    submit = _peticion(session, f"{_BASE_URL}/maps/search-v2", params={
-        "query": query,
-        "limit": max_leads,
+    payload = {
+        "query": [query],
         "language": language,
         "region": "CO",
-    })
-    results_location = submit.json().get("results_location")
-    if not results_location:
-        # Respuesta síncrona (algunos casos devuelven los datos directamente)
-        data = submit.json().get("data")
-        return _parsear(data)
+        "organizationsPerQueryLimit": max_leads,
+        "async": False,                        # tiempo real: respuesta inmediata
+    }
+    headers = {"X-API-KEY": OUTSCRAPER_API_KEY, "Content-Type": "application/json"}
 
-    # 2) Polling hasta que la tarea termine (con tope de tiempo)
-    inicio = time.time()
-    while time.time() - inicio < _MAX_ESPERA_RESULTADO:
-        time.sleep(5)
-        estado = _peticion(session, results_location).json()
-        if estado.get("status") and estado["status"] != "Pending":
-            return _parsear(estado.get("data"))
+    ultimo = None
+    for intento in range(_REINTENTOS):
+        try:
+            r = requests.post(
+                f"{_BASE_URL}{_SEARCH_PATH}", json=payload, headers=headers, timeout=_TIMEOUT
+            )
+            if r.status_code in (401, 403):
+                raise OutscraperAuthError(
+                    "Outscraper rechazó la API key (401/403). Puede ser una key inválida, "
+                    "falta de créditos o un límite temporal de la cuenta. Revisa tu saldo en "
+                    "https://app.outscraper.com/profile e inténtalo de nuevo en unos minutos."
+                )
+            if r.status_code in _CODIGOS_REINTENTABLES:
+                ultimo = f"HTTP {r.status_code}"
+                time.sleep(2 * (intento + 1))
+                continue
+            r.raise_for_status()
+            data = r.json().get("data", [])
+            return _parsear(data)
+        except requests.exceptions.RequestException as e:
+            ultimo = f"conexión ({type(e).__name__})"
+            time.sleep(2 * (intento + 1))
 
     raise OutscraperAuthError(
-        "La búsqueda tardó demasiado en Outscraper y se canceló. Inténtalo de nuevo."
+        f"Outscraper no respondió tras {_REINTENTOS} intentos ({ultimo}). "
+        "Inténtalo de nuevo en unos minutos."
     )
 
 
@@ -97,9 +86,9 @@ def _parsear(data):
         for e in grupo:
             empresas.append({
                 "Nombre": e.get("name") or "N/A",
-                "Dirección": e.get("full_address") or e.get("address") or "N/A",
+                "Dirección": e.get("address") or e.get("full_address") or "N/A",
                 "Teléfono": e.get("phone") or e.get("phone_number") or "N/A",
-                "Sitio Web": e.get("site") or e.get("website") or "N/A",
+                "Sitio Web": e.get("website") or e.get("site") or "N/A",
                 "Rating": e.get("rating") or 0,
                 "Reseñas_totales": e.get("reviews") if e.get("reviews") is not None else e.get("reviews_count", 0),
             })
